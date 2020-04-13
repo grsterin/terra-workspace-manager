@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 public class StairwayJdbcConfiguration extends JdbcConfiguration {
   private String migrateUpgrade;
   private String forceClean;
+  private String stairwayName;
 
   public String getMigrateUpgrade() {
     return migrateUpgrade;
@@ -25,6 +26,14 @@ public class StairwayJdbcConfiguration extends JdbcConfiguration {
 
   public void setForceClean(String forceClean) {
     this.forceClean = forceClean;
+  }
+
+  public String getStairwayName() {
+    return stairwayName;
+  }
+
+  public void setStairwayName(String stairwayName) {
+    this.stairwayName = stairwayName;
   }
 
   public boolean isMigrateUpgrade() {
