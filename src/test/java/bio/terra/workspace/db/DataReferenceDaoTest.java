@@ -15,6 +15,8 @@ import bio.terra.workspace.service.datareference.exception.InvalidDataReferenceE
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.UUID;
+import org.jooq.exception.DataAccessException;
+import org.jooq.exception.SQLStateClass;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -95,15 +97,22 @@ public class DataReferenceDaoTest {
     assertThrows(
         DataIntegrityViolationException.class,
         () -> {
-          dataReferenceDao.createDataReference(
-              referenceId,
-              UUID.randomUUID(), // non-existing workspace ID
-              name,
-              JsonNullable.undefined(),
-              JsonNullable.of(credentialId),
-              cloningInstructions,
-              JsonNullable.of(referenceType),
-              JsonNullable.of(reference.toString()));
+          try {
+            dataReferenceDao.createDataReference(
+                referenceId,
+                UUID.randomUUID(), // non-existing workspace ID
+                name,
+                JsonNullable.undefined(),
+                JsonNullable.of(credentialId),
+                cloningInstructions,
+                JsonNullable.of(referenceType),
+                JsonNullable.of(reference));
+          } catch (DataAccessException ex) {
+            if (ex.sqlStateClass() == SQLStateClass.C23_INTEGRITY_CONSTRAINT_VIOLATION) {
+              throw new DataIntegrityViolationException("test");
+            }
+            throw ex;
+          }
         });
   }
 
@@ -119,7 +128,7 @@ public class DataReferenceDaoTest {
         JsonNullable.of(credentialId),
         cloningInstructions,
         JsonNullable.of(referenceType),
-        JsonNullable.of(reference.toString()));
+        JsonNullable.of(reference));
     DataReferenceDescription result = dataReferenceDao.getDataReference(referenceId);
 
     assertThat(result.getWorkspaceId(), equalTo(workspaceId));

@@ -1,35 +1,32 @@
 package bio.terra.workspace.db;
 
-import bio.terra.workspace.app.configuration.WorkspaceManagerJdbcConfiguration;
+import static bio.terra.workspace.db.generated.tables.WorkspaceDataReference.*;
+import static bio.terra.workspace.db.generated.tables.WorkspaceResource.*;
+
 import bio.terra.workspace.common.exception.DataReferenceNotFoundException;
+import bio.terra.workspace.db.generated.tables.WorkspaceDataReference;
+import bio.terra.workspace.db.generated.tables.WorkspaceResource;
 import bio.terra.workspace.generated.model.DataReferenceDescription;
 import bio.terra.workspace.generated.model.DataReferenceList;
 import bio.terra.workspace.generated.model.ResourceDescription;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
-import org.apache.commons.lang3.StringUtils;
+import org.jooq.*;
 import org.openapitools.jackson.nullable.JsonNullable;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.EmptyResultDataAccessException;
-import org.springframework.jdbc.core.RowMapper;
-import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 
 @Component
 public class DataReferenceDao {
 
-  private final NamedParameterJdbcTemplate jdbcTemplate;
+  private final DSLContext dslContext;
+
+  private static final WorkspaceDataReference referenceTable = WORKSPACE_DATA_REFERENCE.as("referenceTable");
+  private static final WorkspaceResource resourceTable = WORKSPACE_RESOURCE.as("resourceTable");
 
   @Autowired
-  public DataReferenceDao(WorkspaceManagerJdbcConfiguration jdbcConfiguration) {
-    this.jdbcTemplate = new NamedParameterJdbcTemplate(jdbcConfiguration.getDataSource());
+  public DataReferenceDao(DSLContext dslContext) {
+    this.dslContext = dslContext;
   }
 
   public String createDataReference(
@@ -41,148 +38,121 @@ public class DataReferenceDao {
       String cloningInstructions,
       JsonNullable<String> referenceType,
       JsonNullable<String> reference) {
-    String sql =
-        "INSERT INTO workspace_data_reference (workspace_id, reference_id, name, resource_id, credential_id, cloning_instructions, reference_type, reference) VALUES "
-            + "(:workspace_id, :reference_id, :name, :resource_id, :credential_id, :cloning_instructions, :reference_type, cast(:reference AS json))";
 
-    Map<String, Object> paramMap = new HashMap<>();
-    paramMap.put("workspace_id", workspaceId.toString());
-    paramMap.put("reference_id", referenceId.toString());
-    paramMap.put("name", name);
-    paramMap.put("cloning_instructions", cloningInstructions);
-    paramMap.put("credential_id", credentialId.orElse(null));
-    paramMap.put("resource_id", resourceId.orElse(null));
-    paramMap.put("reference_type", referenceType.orElse(null));
-    paramMap.put("reference", reference.orElse(null));
+    dslContext
+        .insertInto(referenceTable)
+        .columns(
+            referenceTable.WORKSPACE_ID,
+            referenceTable.REFERENCE_ID,
+            referenceTable.NAME,
+            referenceTable.CLONING_INSTRUCTIONS,
+            referenceTable.CREDENTIAL_ID,
+            referenceTable.RESOURCE_ID,
+            referenceTable.REFERENCE_TYPE,
+            referenceTable.REFERENCE)
+        .values(
+            workspaceId.toString(),
+            referenceId.toString(),
+            name,
+            cloningInstructions,
+            credentialId.orElse(null),
+            resourceId.isPresent() ? resourceId.get().toString() : null,
+            referenceType.orElse(null),
+            JSON.valueOf(reference.orElse(null)))
+        .execute();
 
-    jdbcTemplate.update(sql, paramMap);
     return referenceId.toString();
   }
 
   public DataReferenceDescription getDataReference(UUID referenceId) {
-    String sql =
-        "SELECT workspace_id, reference_id, name, resource_id, credential_id, cloning_instructions, reference_type, reference from workspace_data_reference where reference_id = :id";
+    DataReferenceDescription dataReference =
+        dslContext
+            .selectFrom(referenceTable)
+            .where(referenceTable.REFERENCE_ID.eq(referenceId.toString()))
+            .fetchOne(new DataReferenceMapper());
 
-    Map<String, Object> paramMap = new HashMap<>();
-    paramMap.put("id", referenceId.toString());
-
-    try {
-      return jdbcTemplate.queryForObject(sql, paramMap, new DataReferenceMapper());
-    } catch (EmptyResultDataAccessException e) {
+    if (dataReference != null) {
+      return dataReference;
+    } else {
       throw new DataReferenceNotFoundException("Data Reference not found.");
     }
   }
 
   public boolean isControlled(UUID referenceId) {
-    String sql =
-        "SELECT CASE WHEN resource_id IS NULL THEN 'false' ELSE 'true' END FROM workspace_data_reference where reference_id = :id";
-
-    Map<String, Object> paramMap = new HashMap<>();
-    paramMap.put("id", referenceId.toString());
-
-    try {
-      return jdbcTemplate.queryForObject(sql, paramMap, Boolean.class).booleanValue();
-    } catch (EmptyResultDataAccessException e) {
+    Record1<String> rec =
+        dslContext
+            .select(referenceTable.RESOURCE_ID)
+            .from(referenceTable)
+            .where(referenceTable.REFERENCE_ID.eq(referenceId.toString()))
+            .fetchOne();
+    if (rec != null) {
+      return rec.get(referenceTable.RESOURCE_ID) != null;
+    } else {
       throw new DataReferenceNotFoundException("Data Reference not found.");
     }
   }
 
   public boolean deleteDataReference(UUID referenceId) {
-    Map<String, Object> paramMap = new HashMap<String, Object>();
-    paramMap.put("id", referenceId.toString());
     int rowsAffected =
-        jdbcTemplate.update(
-            "DELETE FROM workspace_data_reference WHERE reference_id = :id", paramMap);
+        dslContext
+            .delete(referenceTable)
+            .where(referenceTable.REFERENCE_ID.eq(referenceId.toString()))
+            .execute();
     return rowsAffected > 0;
   }
 
   public DataReferenceList enumerateDataReferences(
       String workspaceId, String owner, int offset, int limit) {
-    List<String> whereClauses = new ArrayList<>();
-    whereClauses.add("(ref.workspace_id = :id)");
-    whereClauses.add(uncontrolledOrVisibleResourcesClause("resource", "ref"));
-    String filterSql = combineWhereClauses(whereClauses);
-    String sql =
-        "SELECT ref.workspace_id, ref.reference_id, ref.name, ref.resource_id, ref.credential_id, ref.cloning_instructions, ref.reference_type, ref.reference,"
-            + " resource.resource_id, resource.associated_app, resource.is_visible, resource.owner, resource.attributes"
-            + " FROM workspace_data_reference AS ref"
-            + " LEFT JOIN workspace_resource AS resource ON ref.resource_id = resource.resource_id"
-            + filterSql
-            + " ORDER BY ref.reference_id"
-            + " OFFSET :offset"
-            + " LIMIT :limit";
-    MapSqlParameterSource params = new MapSqlParameterSource();
-    params.addValue("id", workspaceId);
-    params.addValue("owner", owner);
-    params.addValue("offset", offset);
-    params.addValue("limit", limit);
     List<DataReferenceDescription> resultList =
-        jdbcTemplate.query(sql, params, new DataReferenceMapper());
+        dslContext
+            .select()
+            .from(referenceTable)
+            .leftOuterJoin(resourceTable)
+            .on(referenceTable.RESOURCE_ID.eq(resourceTable.RESOURCE_ID))
+            .where(referenceTable.WORKSPACE_ID.eq(workspaceId))
+            .and(
+                referenceTable
+                    .RESOURCE_ID
+                    .isNull()
+                    .or(resourceTable.IS_VISIBLE.eq(true).or(resourceTable.OWNER.eq(owner))))
+            .orderBy(referenceTable.REFERENCE_ID)
+            .offset(offset)
+            .limit(limit)
+            .fetch(new DataReferenceMapper());
     return new DataReferenceList().resources(resultList);
   }
 
-  private static class ResourceDescriptionMapper implements RowMapper<ResourceDescription> {
-    public ResourceDescription mapRow(ResultSet rs, int rowNum) throws SQLException {
+  private static class ResourceDescriptionMapper implements RecordMapper<Record, ResourceDescription> {
+    @Override
+    public ResourceDescription map(Record rec) {
       return new ResourceDescription()
-          .workspaceId(UUID.fromString(rs.getString("workspace_id")))
-          .resourceId(UUID.fromString(rs.getString("resource_id")))
-          .isVisible(rs.getBoolean("is_visible"))
-          .owner(rs.getString("owner"))
-          .attributes(rs.getString("attributes"));
+          .workspaceId(UUID.fromString(rec.get(resourceTable.WORKSPACE_ID)))
+          .resourceId(UUID.fromString(rec.get(resourceTable.RESOURCE_ID)))
+          .isVisible(rec.get(resourceTable.IS_VISIBLE))
+          .owner(rec.get(resourceTable.OWNER))
+          .attributes(rec.get(resourceTable.ATTRIBUTES).toString());
     }
   }
 
-  private static class DataReferenceMapper implements RowMapper<DataReferenceDescription> {
-    public DataReferenceDescription mapRow(ResultSet rs, int rowNum) throws SQLException {
+  private static class DataReferenceMapper
+      implements RecordMapper<Record, DataReferenceDescription> {
+    @Override
+    public DataReferenceDescription map(Record rec) {
       ResourceDescriptionMapper resourceDescriptionMapper = new ResourceDescriptionMapper();
+      String resourceId = rec.get(referenceTable.RESOURCE_ID);
       return new DataReferenceDescription()
-          .workspaceId(UUID.fromString(rs.getString("workspace_id")))
-          .referenceId(UUID.fromString(rs.getString("reference_id")))
-          .name(rs.getString("name"))
-          .resourceDescription(
-              rs.getString("resource_id") == null
-                  ? null
-                  : resourceDescriptionMapper.mapRow(rs, rowNum))
-          .credentialId(rs.getString("credential_id"))
+          .workspaceId(UUID.fromString(rec.get(referenceTable.WORKSPACE_ID)))
+          .referenceId(UUID.fromString(rec.get(referenceTable.REFERENCE_ID)))
+          .name(rec.get(referenceTable.NAME))
+          .resourceDescription(resourceId == null ? null : resourceDescriptionMapper.map(rec))
+          .credentialId(rec.get(referenceTable.CREDENTIAL_ID))
           .cloningInstructions(
               DataReferenceDescription.CloningInstructionsEnum.fromValue(
-                  rs.getString("cloning_instructions")))
+                  rec.get(referenceTable.CLONING_INSTRUCTIONS)))
           .referenceType(
-              DataReferenceDescription.ReferenceTypeEnum.fromValue(rs.getString("reference_type")))
-          .reference(rs.getString("reference"));
+              DataReferenceDescription.ReferenceTypeEnum.fromValue(
+                  rec.get(referenceTable.REFERENCE_TYPE)))
+          .reference(rec.get(referenceTable.REFERENCE).toString());
     }
-  }
-
-  // Returns a SQL condition as a string accepts both uncontrolled data references and visible
-  // controlled references. Uncontrolled references are not tracked as resources, and their
-  // existence is always visible to all workspace readers.
-  public static String uncontrolledOrVisibleResourcesClause(
-      String resourceTableAlias, String referenceTableAlias) {
-    return "(("
-        + referenceTableAlias
-        + ".resource_id IS NULL) OR "
-        + visibleResourcesClause(resourceTableAlias)
-        + ")";
-  }
-
-  // Returns a SQL condition as a string that filters out invisible controlled references.
-  // References are considered 'invisible' if the is_visible column of the corresponding resource
-  // is false AND the resource owner is not the user issuing the query.
-  // Uncontrolled references are not tracked as resources, and their existence is always visible
-  // to all workspace readers.
-  public static String visibleResourcesClause(String resourceTableAlias) {
-    return "("
-        + resourceTableAlias
-        + ".is_visible = true OR "
-        + resourceTableAlias
-        + ".owner = :owner)";
-  }
-
-  // Combines a list of String SQL conditions with the delimiter `" AND "` to create a single
-  // SQL `WHERE` clause. Ignores null and empty strings.
-  public static String combineWhereClauses(List<String> clauses) {
-    return " WHERE ("
-        + clauses.stream().filter(StringUtils::isNotBlank).collect(Collectors.joining(" AND "))
-        + ")";
   }
 }

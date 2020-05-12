@@ -1,17 +1,17 @@
 package bio.terra.workspace.db;
 
-import bio.terra.workspace.app.configuration.WorkspaceManagerJdbcConfiguration;
+import static bio.terra.workspace.db.generated.tables.Workspace.*;
+
 import bio.terra.workspace.common.exception.DuplicateWorkspaceException;
 import bio.terra.workspace.common.exception.WorkspaceNotFoundException;
+import bio.terra.workspace.db.generated.tables.records.WorkspaceRecord;
 import bio.terra.workspace.generated.model.WorkspaceDescription;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.UUID;
+import org.jooq.DSLContext;
+import org.jooq.exception.DataAccessException;
+import org.jooq.exception.SQLStateClass;
 import org.openapitools.jackson.nullable.JsonNullable;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DuplicateKeyException;
-import org.springframework.dao.EmptyResultDataAccessException;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Propagation;
@@ -19,63 +19,56 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Component
 public class WorkspaceDao {
-  private final NamedParameterJdbcTemplate jdbcTemplate;
+  private final DSLContext dslContext;
 
   @Autowired
-  public WorkspaceDao(WorkspaceManagerJdbcConfiguration jdbcConfiguration) {
-    jdbcTemplate = new NamedParameterJdbcTemplate(jdbcConfiguration.getDataSource());
+  public WorkspaceDao(DSLContext dslContext) {
+    this.dslContext = dslContext;
   }
 
   @Transactional(propagation = Propagation.REQUIRED, isolation = Isolation.SERIALIZABLE)
   public String createWorkspace(UUID workspaceId, JsonNullable<UUID> spendProfile) {
-    String sql =
-        "INSERT INTO workspace (workspace_id, spend_profile, profile_settable) values "
-            + "(:id, :spend_profile, :spend_profile_settable)";
-
-    Map<String, Object> paramMap = new HashMap<>();
-    paramMap.put("id", workspaceId.toString());
-    paramMap.put("spend_profile", spendProfile.orElse(null));
-    paramMap.put("spend_profile_settable", !spendProfile.isPresent());
-
     try {
-      jdbcTemplate.update(sql, paramMap);
-    } catch (DuplicateKeyException e) {
-      throw new DuplicateWorkspaceException(
-          "Workspace " + workspaceId.toString() + " already exists.", e);
+      dslContext
+          .insertInto(WORKSPACE)
+          .columns(WORKSPACE.WORKSPACE_ID, WORKSPACE.SPEND_PROFILE, WORKSPACE.PROFILE_SETTABLE)
+          .values(
+              workspaceId.toString(),
+              spendProfile.isPresent() ? spendProfile.get().toString() : null,
+              !spendProfile.isPresent())
+          .execute();
+    } catch (DataAccessException ex) {
+      if (ex.sqlStateClass() == SQLStateClass.C23_INTEGRITY_CONSTRAINT_VIOLATION) {
+        throw new DuplicateWorkspaceException("Workspace " + workspaceId.toString() + " already exists.", ex);
+      }
+      throw ex;
     }
+
     return workspaceId.toString();
   }
 
   @Transactional(propagation = Propagation.REQUIRED, isolation = Isolation.SERIALIZABLE)
   public boolean deleteWorkspace(UUID workspaceId) {
-    Map<String, Object> paramMap = new HashMap<String, Object>();
-    paramMap.put("id", workspaceId.toString());
     int rowsAffected =
-        jdbcTemplate.update("DELETE FROM workspace WHERE workspace_id = :id", paramMap);
+        dslContext
+            .delete(WORKSPACE)
+            .where(WORKSPACE.WORKSPACE_ID.eq(workspaceId.toString()))
+            .execute();
     return rowsAffected > 0;
   }
 
   public WorkspaceDescription getWorkspace(String id) {
-    String sql = "SELECT * FROM workspace where workspace_id = (:id)";
-
-    Map<String, Object> paramMap = new HashMap<>();
-    paramMap.put("id", id);
-
-    try {
-      Map<String, Object> queryOutput = jdbcTemplate.queryForMap(sql, paramMap);
-
+    WorkspaceRecord rec =
+        dslContext.selectFrom(WORKSPACE).where(WORKSPACE.WORKSPACE_ID.eq(id)).fetchOne();
+    if (rec != null) {
       WorkspaceDescription desc = new WorkspaceDescription();
-      desc.setId(UUID.fromString(queryOutput.get("workspace_id").toString()));
-
-      if (queryOutput.getOrDefault("spend_profile", null) == null) {
-        desc.setSpendProfile(JsonNullable.undefined());
-      } else {
-        desc.setSpendProfile(
-            JsonNullable.of(UUID.fromString(queryOutput.get("spend_profile").toString())));
-      }
-
+      desc.setId(UUID.fromString(rec.getWorkspaceId()));
+      desc.setSpendProfile(
+          rec.getSpendProfile() != null
+              ? JsonNullable.of(UUID.fromString(rec.getSpendProfile()))
+              : JsonNullable.undefined());
       return desc;
-    } catch (EmptyResultDataAccessException e) {
+    } else {
       throw new WorkspaceNotFoundException("Workspace not found.");
     }
   }

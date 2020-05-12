@@ -1,5 +1,8 @@
 package bio.terra.workspace.app.configuration;
 
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -43,5 +46,10 @@ public class WorkspaceManagerJdbcConfiguration extends JdbcConfiguration {
   @Bean("transactionManager")
   public PlatformTransactionManager getTransactionManager() {
     return new DataSourceTransactionManager(getDataSource());
+  }
+
+  @Bean
+  public DSLContext dslContext() {
+    return DSL.using(this.getDataSource(), SQLDialect.POSTGRES);
   }
 }
